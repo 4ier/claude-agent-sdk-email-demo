@@ -7,6 +7,7 @@ import { smtpInputSchema } from './mcp/smtpTool';
 import { IncomingMessage, ServerResponse, createServer } from 'http';
 import { z } from 'zod';
 import { SearchService } from './services/searchService';
+import { getLastSmtpMessageId, setLastSmtpMessageId } from './mcp/smtpTool';
 
 const log = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -117,47 +118,108 @@ async function start() {
         }
         const { to, recipient, intent, language, site } = parsed.data;
 
-        // Use local search service to gather context and compose content
-        const results = await searchService.search(`${recipient} ${intent}`, 5, site);
-        const bullets = results.slice(0, 5).map((r) => `• ${r.title} (${r.url})`).join('\n');
-        const greeting = language === 'zh-CN' ? '您好' : 'Hello';
-        const humor = language === 'zh-CN'
-          ? '技术小幽默：为什么开发者分不清万圣节和圣诞节？因为 Oct 31 == Dec 25。'
-          : 'Tech humor: Why do developers confuse Halloween and Christmas? Because Oct 31 == Dec 25.';
-        const finalText = [
-          `${greeting}，根据公开资料为您整理了相关信息：`,
-          bullets || '(暂未检索到更多公开资料)',
+        // Delegate fully to the Agent: it decides how to search, write, and send.
+        const prompt = [
+          'You are an autonomous outreach agent.',
+          `Recipient profile: ${recipient}`,
+          `Outbound intent: ${intent}`,
+          site ? `Preferred site for research (optional): ${site}` : '',
+          `Language: ${language} (use this language for subject and body)`,
           '',
-          `${humor}`,
-        ].join('\n');
+          'Instructions:',
+          '- Decide whether and how to research using tool `web_search` to gather public info.',
+          '- Compose a concise, personalized email (subject + text or html).',
+          '- Send exactly one email via tool `smtp_send` with args: { to, subject, text? or html? }.',
+          `- Use "to": ${to} as the recipient address.`,
+          '- Do not ask for confirmation; act autonomously.',
+          '- After sending, reply with ONLY this JSON object on a single line:',
+          '- {"status":"sent","messageId":"<id>"}',
+        ].filter(Boolean).join('\n');
 
-        if (!finalText) {
-          return sendJson(res, 500, { ok: false, error: 'Agent returned no content' });
-        }
-        // Try parse JSON from agent final message
-        let subject = '邮件';
-        let html: string | undefined;
-        let text: string | undefined;
-        try {
-          const trimmed = finalText.trim();
-          const firstBrace = trimmed.indexOf('{');
-          const lastBrace = trimmed.lastIndexOf('}');
-          const jsonStr = firstBrace >= 0 && lastBrace > firstBrace ? trimmed.slice(firstBrace, lastBrace + 1) : trimmed;
-          const parsedJson = JSON.parse(jsonStr);
-          subject = String(parsedJson.subject || subject);
-          html = parsedJson.html ? String(parsedJson.html) : undefined;
-          text = parsedJson.text ? String(parsedJson.text) : undefined;
-        } catch (err) {
-          // Fallback: treat entire text as plain body
-          text = finalText;
+        // 详细打印 Claude 输入（提示词与关键上下文）
+        log.info(
+          {
+            claude_input: {
+              route: '/api/agent/send',
+              model: (options as any)?.model,
+              args: { to, recipient, intent, language, site },
+              prompt,
+            },
+          },
+          'Claude input'
+        );
+
+        setLastSmtpMessageId(undefined);
+        const q = query({ prompt, options });
+        let messageId: string | undefined;
+        let finalJsonId: string | undefined;
+        for await (const ev of q) {
+          const e: any = ev as any;
+          // 详细打印 Claude 输出（完整事件）
+          try {
+            log.info({ claude_output: e }, 'Claude output');
+          } catch {}
+          // 增加工具事件摘要日志，便于观察 e.result 等字段
+          try {
+            const name = e?.name || e?.toolName || e?.tool || e?.tool_id;
+            const args = e?.arguments || e?.args || e?.input || e?.params || e?.toolInput;
+            const result = e?.result || e?.toolResult || e?.output;
+            if (e && (String(e.type).includes('tool') || name)) {
+              log.info(
+                {
+                  claude_tool_summary: {
+                    type: e.type,
+                    name: name || undefined,
+                    hasArgs: !!args,
+                    hasResult: !!result,
+                    resultKeys: result && typeof result === 'object' ? Object.keys(result) : [],
+                  },
+                },
+                'Claude tool summary'
+              );
+            }
+            if (e && e.type === 'message') {
+              const blockTypes = Array.isArray(e.content) ? e.content.map((p: any) => p?.type) : [];
+              log.info({ claude_message_summary: { blockTypes } }, 'Claude message summary');
+            }
+          } catch {}
+          // Capture tool result from smtp_send
+          if (e && (e.type === 'tool_result' || e.type === 'mcp_tool_result')) {
+            const name = e.name || e.toolName || e.tool || e.tool_id || '';
+            if (String(name).includes('smtp_send')) {
+              const result = e.result || e.toolResult || e.output || {};
+              const mid = result?.messageId || result?.data?.messageId;
+              if (mid) messageId = String(mid);
+            }
+          }
+          // Parse final message for JSON
+          if (e && e.type === 'message') {
+            const parts = Array.isArray(e.content) ? e.content : [];
+            const textBlob = parts.map((p: any) => String(p?.text || p?.content || '')).join('\n').trim();
+            if (textBlob) {
+              try {
+                const trimmed = textBlob.trim();
+                const firstBrace = trimmed.indexOf('{');
+                const lastBrace = trimmed.lastIndexOf('}');
+                const jsonStr = firstBrace >= 0 && lastBrace > firstBrace ? trimmed.slice(firstBrace, lastBrace + 1) : trimmed;
+                const obj = JSON.parse(jsonStr);
+                if (obj && obj.messageId) finalJsonId = String(obj.messageId);
+              } catch {
+                // ignore non-JSON assistant messages
+              }
+            }
+          }
         }
 
-        if (!html && !text) {
-          text = '（内容生成失败，请稍后重试）';
-        }
+        // Inside your /api/agent/send handler, before starting the query loop
+        // reset last smtp id to avoid stale reads
+        setLastSmtpMessageId(undefined);
 
-        const sendRes = await emailService.send({ to, subject, text, html });
-        return sendJson(res, 200, { ok: true, messageId: sendRes.messageId });
+        const id = messageId || finalJsonId || getLastSmtpMessageId();
+        if (!id) {
+          return sendJson(res, 500, { ok: false, error: 'Agent did not provide messageId' });
+        }
+        return sendJson(res, 200, { ok: true, messageId: id });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return sendJson(res, 500, { ok: false, error: msg });
@@ -172,22 +234,34 @@ async function start() {
     log.info({ port }, 'REST API server listening');
   });
 
-  // Start a long-running session; non-fatal if startup fails
-  try {
-    log.info({ env: { model: env.CLAUDE_MODEL } }, 'Starting persistent agent');
-    const q = query({
-      prompt: 'Initialize persistent session. You can use smtp_send tool to send emails.',
-      options,
-    });
-    for await (const msg of q) {
-      if ((msg as any).type === 'message') {
-        const content = (msg as any).content ?? [];
-        log.info({ content }, 'Agent message');
+  // Optionally start a long-running Agent session; disabled by default
+  if (env.ENABLE_PERSISTENT_AGENT) {
+    (async () => {
+      try {
+        const persistentPrompt = 'Initialize persistent session. You can use smtp_send tool to send emails.';
+        // 详细打印 Claude 输入（持久会话初始化）
+        log.info(
+          {
+            claude_input: {
+              route: 'persistent_agent',
+              model: (options as any)?.model,
+              prompt: persistentPrompt,
+            },
+          },
+          'Claude input'
+        );
+        const q = query({ prompt: persistentPrompt, options });
+        for await (const ev of q) {
+          const e: any = ev as any;
+          try {
+            log.info({ claude_output: e }, 'Claude output');
+          } catch {}
+        }
+      } catch (err) {
+        const error = err instanceof Error ? { message: err.message, stack: err.stack } : { err };
+        log.error(error, 'Agent failed to start');
       }
-    }
-  } catch (err) {
-    const error = err instanceof Error ? { message: err.message, stack: err.stack } : { err };
-    log.error(error, 'Agent failed to start');
+    })();
   }
 }
 
