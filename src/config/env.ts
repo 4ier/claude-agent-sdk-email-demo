@@ -12,11 +12,15 @@ const envSchema = z.object({
   // Accept any non-empty string to allow latest model IDs (e.g., claude-sonnet-4-5-YYYYMMDD)
   CLAUDE_MODEL: z.string().min(1).default('sonnet'),
   // Optional base URL for model API (e.g., Anthropic proxy/base)
+  // Prefer ANTHROPIC_BASE_URL; CLAUDE_API_BASE_URL remains for backward compatibility
+  ANTHROPIC_BASE_URL: z.string().url().optional(),
   CLAUDE_API_BASE_URL: z.string().url().optional(),
   AGENT_SESSION_ID: z.string().optional(),
   // Optional search configuration
   SEARCH_PROVIDER: z.enum(['bing', 'duckduckgo', 'wikipedia']).optional(),
   BING_SEARCH_API_KEY: z.string().optional(),
+  // Optional: enable starting a long-lived Agent session on boot
+  ENABLE_PERSISTENT_AGENT: z.string().optional().default('false').transform((v) => v === 'true'),
 });
 
 export type AppEnv = z.infer<typeof envSchema> & { SMTP_PORT: number; SMTP_SECURE: boolean };

@@ -16,10 +16,11 @@ export function createAgentOptions(params: {
 }): Options {
   const env = getEnv();
   const envDict: Record<string, string> = { ...process.env } as Record<string, string>;
-  if (env.CLAUDE_API_BASE_URL) {
+  const baseUrl = env.ANTHROPIC_BASE_URL || env.CLAUDE_API_BASE_URL;
+  if (baseUrl) {
     // Map to common SDK/CLI environment keys for base URL override
-    envDict['ANTHROPIC_API_URL'] = env.CLAUDE_API_BASE_URL;
-    envDict['ANTHROPIC_BASE_URL'] = env.CLAUDE_API_BASE_URL;
+    envDict['ANTHROPIC_API_URL'] = baseUrl;
+    envDict['ANTHROPIC_BASE_URL'] = baseUrl;
   }
   const emailService = new EmailService({
     host: env.SMTP_HOST,
@@ -46,6 +47,15 @@ export function createAgentOptions(params: {
     model: params.model,
     systemPrompt: { type: 'preset', preset: 'claude_code', append: 'Persistent agent with SMTP tool' },
     includePartialMessages: false,
+    // Auto-approve MCP tool uses to avoid interactive permission prompts in server mode
+    permissionMode: 'bypassPermissions',
+    // Explicitly allow local MCP tools by name to be safe across modes
+    allowedTools: [
+      'smtp_send',
+      'web_search',
+      'mcp__local-tools__smtp_send',
+      'mcp__local-tools__web_search',
+    ],
     strictMcpConfig: false,
     mcpServers: { 'local-tools': mcpTools },
     resume: params.sessionId ?? env.AGENT_SESSION_ID,

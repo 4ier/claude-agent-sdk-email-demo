@@ -20,7 +20,7 @@ describe('createAgentOptions', () => {
       SMTP_USER: 'user@example.com',
       SMTP_PASS: 'secret',
       CLAUDE_MODEL: 'sonnet',
-      CLAUDE_API_BASE_URL: 'https://api.anthropic.com',
+      ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
     }, () => createAgentOptions({
       cwd: process.cwd(),
       model: 'sonnet',

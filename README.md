@@ -28,7 +28,7 @@
 确保环境中提供以下变量（可使用`.env`文件与compose一起加载）：
 - `ANTHROPIC_API_KEY`：Claude API密钥
 - `CLAUDE_MODEL`：`sonnet|opus|haiku`
-- `CLAUDE_API_BASE_URL`：可选，自定义模型API Base URL（如代理）
+- `ANTHROPIC_BASE_URL`：可选，自定义模型 API Base URL（如代理）
 - `AGENT_SESSION_ID`：可选，用于恢复会话
 - `SMTP_*`：SMTP连接配置
 
@@ -49,7 +49,7 @@
 参考 `.env.example`，关键项：
 - `CLAUDE_MODEL`: `sonnet | opus | haiku`
 - `AGENT_SESSION_ID`: 用于恢复会话（可选）
-- `CLAUDE_API_BASE_URL`: 可选，覆盖默认的 `https://api.anthropic.com`，方便走代理或私有部署
+- `ANTHROPIC_BASE_URL`: 可选，覆盖默认的 `https://api.anthropic.com`，方便走代理或私有部署
 - `SMTP_*`: SMTP 邮件发送配置
 - `PORT`: REST API 监听端口（默认 3000）
 

@@ -39,7 +39,7 @@ describe('env config', () => {
     }, getEnv)).toThrow(/SMTP_PORT/i);
   });
 
-  it('accepts optional CLAUDE_API_BASE_URL when provided', () => {
+  it('accepts optional ANTHROPIC_BASE_URL when provided', () => {
     const env = withEnv({
       SMTP_HOST: 'smtp.example.com',
       SMTP_PORT: '587',
@@ -47,8 +47,8 @@ describe('env config', () => {
       SMTP_USER: 'user@example.com',
       SMTP_PASS: 'secret',
       CLAUDE_MODEL: 'sonnet',
-      CLAUDE_API_BASE_URL: 'https://api.anthropic.com',
+      ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
     }, getEnv);
-    expect(env.CLAUDE_API_BASE_URL).toBe('https://api.anthropic.com');
+    expect(env.ANTHROPIC_BASE_URL).toBe('https://api.anthropic.com');
   });
 });
