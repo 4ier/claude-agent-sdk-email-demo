@@ -66,6 +66,6 @@ ISC
 ## REST API 测试
 - 启动构建并运行：`npm run build && npm run start`
 - 发送笑话（PowerShell）：
-  - `Invoke-RestMethod -Uri http://localhost:3000/api/joke -Method POST -ContentType 'application/json' -Body '{"to":"771040330@qq.com"}'`
+  - `Invoke-RestMethod -Uri http://localhost:3000/api/joke -Method POST -ContentType 'application/json' -Body '{"to":"xxx@qq.com"}'`
 - 通用发送（PowerShell）：
-  - `Invoke-RestMethod -Uri http://localhost:3000/api/smtp/send -Method POST -ContentType 'application/json' -Body '{"to":"771040330@qq.com","subject":"Hello","text":"Hi"}'`
+  - `Invoke-RestMethod -Uri http://localhost:3000/api/smtp/send -Method POST -ContentType 'application/json' -Body '{"to":"xxx@qq.com","subject":"Hello","text":"Hi"}'`
