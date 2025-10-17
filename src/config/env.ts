@@ -17,7 +17,7 @@ const envSchema = z.object({
   CLAUDE_API_BASE_URL: z.string().url().optional(),
   AGENT_SESSION_ID: z.string().optional(),
   // Optional search configuration
-  SEARCH_PROVIDER: z.enum(['bing', 'duckduckgo', 'wikipedia']).optional(),
+  SEARCH_PROVIDER: z.enum(['bing', 'duckduckgo', 'wikipedia', 'baidu']).optional(),
   BING_SEARCH_API_KEY: z.string().optional(),
   // Optional: enable starting a long-lived Agent session on boot
   ENABLE_PERSISTENT_AGENT: z.string().optional().default('false').transform((v) => v === 'true'),

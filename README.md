@@ -50,6 +50,8 @@
 - `CLAUDE_MODEL`: `sonnet | opus | haiku`
 - `AGENT_SESSION_ID`: 用于恢复会话（可选）
 - `ANTHROPIC_BASE_URL`: 可选，覆盖默认的 `https://api.anthropic.com`，方便走代理或私有部署
+- `SEARCH_PROVIDER`: `baidu | bing | duckduckgo | wikipedia`（推荐 `baidu` 适配国内网络）
+- `BING_SEARCH_API_KEY`: 使用 `bing` 时需要（可选）
 - `SMTP_*`: SMTP 邮件发送配置
 - `PORT`: REST API 监听端口（默认 3000）
 

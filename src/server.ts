@@ -127,11 +127,11 @@ async function start() {
           `Language: ${language} (use this language for subject and body)`,
           '',
           'Instructions:',
-          '- Decide whether and how to research using tool `web_search` to gather public info.',
+          '- Decide if web research is needed. If you research, run at most ONE `web_search` with succinct keywords; limit results to 3–5; skip research if unnecessary.',
           '- Compose a concise, personalized email (subject + text or html).',
-          '- Send exactly one email via tool `smtp_send` with args: { to, subject, text? or html? }.',
+          '- You MUST call `smtp_send` to send exactly one email to the provided address. Call it within your first two tool actions; if research yields no useful results, send without research.',
           `- Use "to": ${to} as the recipient address.`,
-          '- Do not ask for confirmation; act autonomously.',
+          '- Do not ask for confirmation; do not loop; do not retry sending.',
           '- After sending, reply with ONLY this JSON object on a single line:',
           '- {"status":"sent","messageId":"<id>"}',
         ].filter(Boolean).join('\n');
@@ -153,71 +153,84 @@ async function start() {
         const q = query({ prompt, options });
         let messageId: string | undefined;
         let finalJsonId: string | undefined;
-        for await (const ev of q) {
-          const e: any = ev as any;
-          // 详细打印 Claude 输出（完整事件）
-          try {
-            log.info({ claude_output: e }, 'Claude output');
-          } catch {}
-          // 增加工具事件摘要日志，便于观察 e.result 等字段
-          try {
-            const name = e?.name || e?.toolName || e?.tool || e?.tool_id;
-            const args = e?.arguments || e?.args || e?.input || e?.params || e?.toolInput;
-            const result = e?.result || e?.toolResult || e?.output;
-            if (e && (String(e.type).includes('tool') || name)) {
-              log.info(
-                {
-                  claude_tool_summary: {
-                    type: e.type,
-                    name: name || undefined,
-                    hasArgs: !!args,
-                    hasResult: !!result,
-                    resultKeys: result && typeof result === 'object' ? Object.keys(result) : [],
+        // Add a simple timeout to ensure API responds
+        const TIMEOUT_MS = Number(process.env.AGENT_ROUTE_TIMEOUT_MS || 45000);
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; }, TIMEOUT_MS);
+        try {
+          for await (const ev of q) {
+            const e: any = ev as any;
+            // 详细打印 Claude 输出（完整事件）
+            try {
+              log.info({ claude_output: e }, 'Claude output');
+            } catch {}
+            // 增加工具事件摘要日志，便于观察 e.result 等字段
+            try {
+              const name = e?.name || e?.toolName || e?.tool || e?.tool_id;
+              const args = e?.arguments || e?.args || e?.input || e?.params || e?.toolInput;
+              const result = e?.result || e?.toolResult || e?.output;
+              if (e && (String(e.type).includes('tool') || name)) {
+                log.info(
+                  {
+                    claude_tool_summary: {
+                      type: e.type,
+                      name: name || undefined,
+                      hasArgs: !!args,
+                      hasResult: !!result,
+                      resultKeys: result && typeof result === 'object' ? Object.keys(result) : [],
+                    },
                   },
-                },
-                'Claude tool summary'
-              );
-            }
-            if (e && e.type === 'message') {
-              const blockTypes = Array.isArray(e.content) ? e.content.map((p: any) => p?.type) : [];
-              log.info({ claude_message_summary: { blockTypes } }, 'Claude message summary');
-            }
-          } catch {}
-          // Capture tool result from smtp_send
-          if (e && (e.type === 'tool_result' || e.type === 'mcp_tool_result')) {
-            const name = e.name || e.toolName || e.tool || e.tool_id || '';
-            if (String(name).includes('smtp_send')) {
-              const result = e.result || e.toolResult || e.output || {};
-              const mid = result?.messageId || result?.data?.messageId;
-              if (mid) messageId = String(mid);
-            }
-          }
-          // Parse final message for JSON
-          if (e && e.type === 'message') {
-            const parts = Array.isArray(e.content) ? e.content : [];
-            const textBlob = parts.map((p: any) => String(p?.text || p?.content || '')).join('\n').trim();
-            if (textBlob) {
-              try {
-                const trimmed = textBlob.trim();
-                const firstBrace = trimmed.indexOf('{');
-                const lastBrace = trimmed.lastIndexOf('}');
-                const jsonStr = firstBrace >= 0 && lastBrace > firstBrace ? trimmed.slice(firstBrace, lastBrace + 1) : trimmed;
-                const obj = JSON.parse(jsonStr);
-                if (obj && obj.messageId) finalJsonId = String(obj.messageId);
-              } catch {
-                // ignore non-JSON assistant messages
+                  'Claude tool summary'
+                );
+              }
+              if (e && e.type === 'message') {
+                const blockTypes = Array.isArray(e.content) ? e.content.map((p: any) => p?.type) : [];
+                log.info({ claude_message_summary: { blockTypes } }, 'Claude message summary');
+              }
+            } catch {}
+            // Capture tool result from smtp_send
+            if (e && (e.type === 'tool_result' || e.type === 'mcp_tool_result')) {
+              const name = e.name || e.toolName || e.tool || e.tool_id || '';
+              if (String(name).includes('smtp_send')) {
+                const result = e.result || e.toolResult || e.output || {};
+                const mid = result?.messageId || result?.data?.messageId;
+                if (mid) messageId = String(mid);
+                if (messageId) break;
               }
             }
+            // Parse final message for JSON
+            if (e && e.type === 'message') {
+              const parts = Array.isArray(e.content) ? e.content : [];
+              const textBlob = parts.map((p: any) => String(p?.text || p?.content || '')).join('\n').trim();
+              if (textBlob) {
+                try {
+                  const trimmed = textBlob.trim();
+                  const firstBrace = trimmed.indexOf('{');
+                  const lastBrace = trimmed.lastIndexOf('}');
+                  const jsonStr = firstBrace >= 0 && lastBrace > firstBrace ? trimmed.slice(firstBrace, lastBrace + 1) : trimmed;
+                  const obj = JSON.parse(jsonStr);
+                  if (obj && obj.messageId) finalJsonId = String(obj.messageId);
+                  if (finalJsonId) break;
+                } catch {
+                  // ignore non-JSON assistant messages
+                }
+              }
+            }
+            if (timedOut) {
+              log.warn({ route: '/api/agent/send', timedOut: true }, 'Agent route timeout reached');
+              break;
+            }
           }
+        } finally {
+          clearTimeout(timer);
         }
-
         // Inside your /api/agent/send handler, before starting the query loop
         // reset last smtp id to avoid stale reads
-        setLastSmtpMessageId(undefined);
+        // setLastSmtpMessageId(undefined);
 
         const id = messageId || finalJsonId || getLastSmtpMessageId();
         if (!id) {
-          return sendJson(res, 500, { ok: false, error: 'Agent did not provide messageId' });
+          return sendJson(res, timedOut ? 504 : 500, { ok: false, error: timedOut ? 'Agent timed out without messageId' : 'Agent did not provide messageId' });
         }
         return sendJson(res, 200, { ok: true, messageId: id });
       } catch (err) {

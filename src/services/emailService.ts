@@ -1,5 +1,8 @@
 import { z } from 'zod';
 import nodemailer from 'nodemailer';
+import pino from 'pino';
+
+const log = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 export interface EmailConfig {
   host: string;
@@ -48,6 +51,16 @@ export class EmailService {
       text,
       html,
     });
+
+    // Debug delivery details for troubleshooting
+    try {
+      const accepted = (info as any).accepted || [];
+      const rejected = (info as any).rejected || [];
+      const response = (info as any).response;
+      const envelope = (info as any).envelope;
+      log.info({ smtp: { accepted, rejected, response, envelope } }, 'SMTP send result');
+    } catch {}
+
     return { messageId: (info as any).messageId ?? 'unknown' };
   }
 }

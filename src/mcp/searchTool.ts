@@ -21,7 +21,14 @@ export function searchHandler(searchService: SearchService) {
       const { query, limit, site } = args;
       const results = await searchService.search(query, limit, site);
       const count = Array.isArray(results) ? results.length : undefined;
-      log.info({ mcp_tool: 'web_search', stage: 'success', count }, 'MCP tool success');
+      const summary = Array.isArray(results)
+        ? results.slice(0, Math.min(count ?? 0, limit)).map((r: any) => ({
+            title: String(r?.title || ''),
+            url: String(r?.url || ''),
+            snippet: r?.snippet ? String(r.snippet).slice(0, 160) : undefined,
+          }))
+        : [];
+      log.info({ mcp_tool: 'web_search', stage: 'success', count, results: summary }, 'MCP tool success');
       return { ok: true, results };
     } catch (err) {
       const error = err instanceof Error ? { message: err.message, stack: err.stack } : { err };

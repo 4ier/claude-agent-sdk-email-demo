@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import * as cheerio from 'cheerio';
 
 export const searchResultSchema = z.object({
   title: z.string(),
@@ -9,7 +10,7 @@ export const searchResultSchema = z.object({
 export type SearchResult = z.infer<typeof searchResultSchema>;
 
 export interface SearchConfig {
-  provider?: 'bing' | 'duckduckgo' | 'wikipedia';
+  provider?: 'bing' | 'duckduckgo' | 'wikipedia' | 'baidu';
   bingApiKey?: string;
 }
 
@@ -20,11 +21,22 @@ export class SearchService {
     const q = site ? `${query} site:${site}` : query;
     const provider = this.config.provider || (this.config.bingApiKey ? 'bing' : 'duckduckgo');
     try {
+      if (provider === 'baidu') {
+        const bd = await this.searchBaidu(q, limit);
+        if (bd.length) return bd;
+        // fallback to DDG then Wikipedia if Baidu fails
+        const ddg = await this.searchDuckDuckGo(q, limit);
+        if (ddg.length) return ddg;
+        return await this.searchWikipedia(q, limit);
+      }
       if (provider === 'bing' && this.config.bingApiKey) {
         return await this.searchBing(q, limit);
       }
       const ddg = await this.searchDuckDuckGo(q, limit);
       if (ddg.length) return ddg;
+      // prefer Baidu as a domestic-friendly fallback when DDG returns empty
+      const bd = await this.searchBaidu(q, limit);
+      if (bd.length) return bd;
       return await this.searchWikipedia(q, limit);
     } catch {
       return [];
@@ -70,6 +82,35 @@ export class SearchService {
         }
       }
     }
+    return results;
+  }
+
+  private async searchBaidu(query: string, limit: number): Promise<SearchResult[]> {
+    const url = new URL('https://www.baidu.com/s');
+    url.searchParams.set('wd', query);
+    // rn 控制返回条数（并非总是严格），尽量贴近 limit
+    url.searchParams.set('rn', String(Math.min(Math.max(limit, 1), 50)));
+    const res = await fetch(url.toString(), {
+      headers: {
+        // 提供常见浏览器 UA，减少反爬拦截几率
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+      },
+    });
+    const html = await res.text();
+    const $ = cheerio.load(html);
+    const results: SearchResult[] = [];
+    // Baidu 的结构可能变动，尽量宽松选择器
+    $('div.result, div.c-container').each((i, el) => {
+      if (results.length >= limit) return false as any;
+      const a = $(el).find('h3 a').first();
+      const href = (a.attr('href') || '').trim();
+      const title = a.text().trim();
+      const snippet = $(el).find('div.c-abstract, div.content-right_abstract, div.caption-text, div.summary').first().text().trim();
+      if (title && href && /^https?:\/\//.test(href)) {
+        results.push({ title, url: href, snippet });
+      }
+    });
     return results;
   }
 
