@@ -1,0 +1,27 @@
+version: "3.9"
+services:
+  agent:
+    build: .
+    image: lovtalent-2b-agent:latest
+    container_name: lovtalent-2b-agent
+    restart: unless-stopped
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-sonnet}
+      - CLAUDE_API_BASE_URL=${CLAUDE_API_BASE_URL}
+      - AGENT_SESSION_ID=${AGENT_SESSION_ID}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./:/app
+    working_dir: /app
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('fs').access('dist/server.js', require('fs').constants.R_OK, e => process.exit(e?1:0))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
