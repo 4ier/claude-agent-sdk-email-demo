@@ -1,4 +1,4 @@
-# LovTalent 2B Agent
+# Claude Agent SDK email demo
 
 持久态 Claude Agent，支持通过 SMTP 发送邮件，采用 TypeScript + TDD。
 
