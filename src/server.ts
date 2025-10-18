@@ -169,6 +169,30 @@ async function start() {
         }
         const { to, recipient, intent, language, site } = parsed.data;
 
+        // 添加性能优化的参数验证
+        const startTime = Date.now();
+        log.info({ 
+          request_start: startTime,
+          params: { to, recipient, intent, language, site },
+          route: '/api/agent/send'
+        }, 'Request started with performance tracking');
+
+        // 验证关键参数质量
+        if (recipient.length < 2) {
+          return sendJson(res, 400, { ok: false, error: 'Recipient must be at least 2 characters' });
+        }
+        if (intent.length < 5) {
+          return sendJson(res, 400, { ok: false, error: 'Intent must be at least 5 characters' });
+        }
+        
+        // 检查是否包含无效字符（如问号占位符）
+        if (recipient.includes('?') || intent.includes('?')) {
+          return sendJson(res, 400, { 
+            ok: false, 
+            error: 'Invalid characters detected in recipient or intent parameters' 
+          });
+        }
+
         // Check if client wants SSE
         const useSSE = isSSERequest(req);
         
@@ -194,6 +218,7 @@ async function start() {
         ].filter(Boolean).join('\n');
 
         // 详细打印 Claude 输入（提示词与关键上下文）
+        const claudeStartTime = Date.now();
         log.info(
           {
             claude_input: {
@@ -204,6 +229,11 @@ async function start() {
               useSSE,
               sessionId,
             },
+            performance: {
+              request_start: startTime,
+              claude_start: claudeStartTime,
+              initialization_time_ms: claudeStartTime - startTime
+            }
           },
           'Claude input'
         );
@@ -226,15 +256,18 @@ async function start() {
           let messageId: string | undefined;
           let finalJsonId: string | undefined;
           
-          const TIMEOUT_MS = Number(process.env.AGENT_ROUTE_TIMEOUT_MS || 45000);
+          const TIMEOUT_MS = Number(process.env.AGENT_ROUTE_TIMEOUT_MS || 120000); // 增加到120秒
           let timedOut = false;
+          let taskCompleted = false;
           const timer = setTimeout(() => { 
             timedOut = true;
-            sendSSEEvent(res, 'error', { 
-              error: 'Timeout'
-            });
-            cleanup();
-            res.end();
+            if (!taskCompleted) {
+              sendSSEEvent(res, 'error', { 
+                error: 'Agent processing timeout - task took longer than expected'
+              });
+              cleanup();
+              res.end();
+            }
           }, TIMEOUT_MS);
 
           try {
@@ -246,11 +279,30 @@ async function start() {
                 log.info({ claude_output: e }, 'Claude output');
               } catch {}
 
-              // 只处理assistant的文本消息，实现token流式输出
-              if (e && e.type === 'message') {
-                const parts = Array.isArray(e.content) ? e.content : [];
+              // 添加详细的事件分析日志
+              try {
+                log.info({ 
+                  event_analysis: {
+                    type: e?.type,
+                    message_role: e?.message?.role,
+                    has_content: !!(e?.content || e?.message?.content),
+                    content_length: (e?.content?.length || e?.message?.content?.length || 0),
+                    tool_name: e?.name || e?.toolName || e?.tool || e?.tool_id,
+                    has_result: !!(e?.result || e?.toolResult || e?.output)
+                  }
+                }, 'Processing Claude event');
+              } catch {}
+
+              // 处理assistant消息 - 支持多种消息格式
+              const isAssistantMessage = (e && e.type === 'message') || 
+                                       (e && e.message && e.message.role === 'assistant');
+              
+              if (isAssistantMessage) {
+                // 支持多种内容格式
+                const content = e.content || e.message?.content || [];
+                const parts = Array.isArray(content) ? content : [content];
                 
-                // 只处理文本内容，忽略工具调用
+                // 处理文本内容
                 for (const part of parts) {
                   if (part && part.type === 'text' && part.text) {
                     const textContent = String(part.text).trim();
@@ -273,10 +325,39 @@ async function start() {
                       const lastBrace = trimmed.lastIndexOf('}');
                       const jsonStr = firstBrace >= 0 && lastBrace > firstBrace ? trimmed.slice(firstBrace, lastBrace + 1) : trimmed;
                       const obj = JSON.parse(jsonStr);
-                      if (obj && obj.messageId) finalJsonId = String(obj.messageId);
+                      if (obj && (obj.messageId || obj.status === 'sent')) {
+                        if (obj.messageId) finalJsonId = String(obj.messageId);
+                        taskCompleted = true; // 标记任务完成
+                        log.info({ final_response: obj }, 'Task completed with final response');
+                      }
                     } catch {
                       // ignore non-JSON assistant messages
                     }
+                  }
+                }
+                
+                // 处理直接的文本内容（如果不是数组格式）
+                if (typeof content === 'string' && content.trim()) {
+                  const textContent = content.trim();
+                  const tokens = textContent.split(/(\s+)/);
+                  for (const token of tokens) {
+                    if (token.trim()) {
+                      sendSSEEvent(res, 'token', {
+                        content: token
+                      });
+                    }
+                  }
+                  
+                  // 检查是否是最终JSON响应
+                  try {
+                    const obj = JSON.parse(textContent);
+                    if (obj && (obj.messageId || obj.status === 'sent')) {
+                      if (obj.messageId) finalJsonId = String(obj.messageId);
+                      taskCompleted = true;
+                      log.info({ final_response: obj }, 'Task completed with final response');
+                    }
+                  } catch {
+                    // ignore non-JSON content
                   }
                 }
               }
@@ -289,7 +370,10 @@ async function start() {
                 // 捕获smtp_send的messageId
                 if (String(name).includes('smtp_send')) {
                   const mid = result?.messageId || result?.data?.messageId;
-                  if (mid) messageId = String(mid);
+                  if (mid) {
+                    messageId = String(mid);
+                    log.info({ smtp_messageId: messageId }, 'SMTP message ID captured');
+                  }
                 }
               }
 
@@ -322,8 +406,16 @@ async function start() {
                 break;
               }
 
-              // Break if we have messageId
-              if (messageId || finalJsonId) break;
+              // Break if we have messageId or task is completed
+              if (messageId || finalJsonId || taskCompleted) {
+                log.info({ 
+                  messageId, 
+                  finalJsonId, 
+                  taskCompleted,
+                  reason: 'Breaking loop - task completed or messageId found'
+                }, 'SSE loop ending');
+                break;
+              }
             }
           } catch (sseError) {
             // Handle SSE-specific errors
@@ -343,15 +435,57 @@ async function start() {
 
           const id = messageId || finalJsonId || getLastSmtpMessageId();
           
-          // Send final event
-          if (id) {
+          // Send final event with performance summary
+          const endTime = Date.now();
+          const totalDuration = endTime - startTime;
+          const claudeDuration = endTime - claudeStartTime;
+          
+          if (taskCompleted || id) {
             sendSSEEvent(res, 'done', {
-              finished: true
+              finished: true,
+              messageId: id,
+              success: true,
+              performance: {
+                total_duration_ms: totalDuration,
+                claude_duration_ms: claudeDuration,
+                initialization_time_ms: claudeStartTime - startTime
+              }
             });
+            log.info({ 
+              final_messageId: id, 
+              taskCompleted,
+              success: true,
+              performance_summary: {
+                total_duration_ms: totalDuration,
+                claude_duration_ms: claudeDuration,
+                initialization_time_ms: claudeStartTime - startTime,
+                efficiency_score: totalDuration < 30000 ? 'good' : totalDuration < 60000 ? 'acceptable' : 'needs_optimization'
+              }
+            }, 'SSE completed successfully');
+          } else if (timedOut) {
+            sendSSEEvent(res, 'error', {
+              error: 'Agent processing timeout - task took longer than expected',
+              timeout: true,
+              performance: {
+                total_duration_ms: totalDuration,
+                timeout_threshold_ms: TIMEOUT_MS
+              }
+            });
+            log.warn({ 
+              timeout_duration_ms: totalDuration,
+              timeout_threshold_ms: TIMEOUT_MS 
+            }, 'SSE ended due to timeout');
           } else {
             sendSSEEvent(res, 'error', {
-              error: timedOut ? 'Timeout' : 'No response'
+              error: 'No response received from agent',
+              noResponse: true,
+              performance: {
+                total_duration_ms: totalDuration
+              }
             });
+            log.warn({ 
+              duration_ms: totalDuration 
+            }, 'SSE ended with no response');
           }
           
           res.end();
