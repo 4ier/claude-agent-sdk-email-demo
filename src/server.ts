@@ -213,7 +213,12 @@ async function start() {
           '- You MUST call `smtp_send` to send exactly one email to the provided address. Call it within your first two tool actions; if research yields no useful results, send without research.',
           `- Use "to": ${to} as the recipient address.`,
           '- Do not ask for confirmation; do not loop; do not retry sending.',
-          '- After sending, reply with ONLY this JSON object on a single line:',
+          '- After sending the email, provide a detailed explanation of what you did, including:',
+          '  * Any research you conducted and key findings',
+          '  * The email subject and content you composed',
+          '  * Why you chose this approach for the recipient',
+          '  * Confirmation that the email was sent successfully',
+          '- Finally, end your response with this JSON object on a single line:',
           '- {"status":"sent","messageId":"<id>"}',
         ].filter(Boolean).join('\n');
 
@@ -318,7 +323,7 @@ async function start() {
                       }
                     }
 
-                    // 尝试解析最终的JSON响应以获取messageId
+                    // 尝试解析最终的JSON响应以获取messageId，但不立即结束流
                     try {
                       const trimmed = textContent.trim();
                       const firstBrace = trimmed.indexOf('{');
@@ -327,8 +332,8 @@ async function start() {
                       const obj = JSON.parse(jsonStr);
                       if (obj && (obj.messageId || obj.status === 'sent')) {
                         if (obj.messageId) finalJsonId = String(obj.messageId);
-                        taskCompleted = true; // 标记任务完成
-                        log.info({ final_response: obj }, 'Task completed with final response');
+                        // 不立即设置taskCompleted，让Claude继续输出完整内容
+                        log.info({ final_response: obj }, 'Found final response JSON, but continuing to capture full content');
                       }
                     } catch {
                       // ignore non-JSON assistant messages
@@ -348,13 +353,13 @@ async function start() {
                     }
                   }
                   
-                  // 检查是否是最终JSON响应
+                  // 检查是否是最终JSON响应，但不立即结束流
                   try {
                     const obj = JSON.parse(textContent);
                     if (obj && (obj.messageId || obj.status === 'sent')) {
                       if (obj.messageId) finalJsonId = String(obj.messageId);
-                      taskCompleted = true;
-                      log.info({ final_response: obj }, 'Task completed with final response');
+                      // 不立即设置taskCompleted，让Claude继续输出完整内容
+                      log.info({ final_response: obj }, 'Found final response JSON, but continuing to capture full content');
                     }
                   } catch {
                     // ignore non-JSON content
@@ -367,12 +372,13 @@ async function start() {
                 const name = e.name || e.toolName || e.tool || e.tool_id || '';
                 const result = e.result || e.toolResult || e.output || {};
                 
-                // 捕获smtp_send的messageId
+                // 捕获smtp_send的messageId，并标记任务完成
                 if (String(name).includes('smtp_send')) {
                   const mid = result?.messageId || result?.data?.messageId;
                   if (mid) {
                     messageId = String(mid);
-                    log.info({ smtp_messageId: messageId }, 'SMTP message ID captured');
+                    taskCompleted = true; // 在SMTP工具完成时标记任务完成
+                    log.info({ smtp_messageId: messageId, taskCompleted: true }, 'SMTP message ID captured and task marked as completed');
                   }
                 }
               }
@@ -406,15 +412,17 @@ async function start() {
                 break;
               }
 
-              // Break if we have messageId or task is completed
-              if (messageId || finalJsonId || taskCompleted) {
+              // 只有在SMTP工具完成且有messageId时才结束循环
+              // 这样可以让Claude输出完整的后续内容
+              if (taskCompleted && messageId) {
+                // 给Claude一些时间输出完整的后续内容
+                // 我们不立即break，而是让循环自然结束
                 log.info({ 
                   messageId, 
                   finalJsonId, 
                   taskCompleted,
-                  reason: 'Breaking loop - task completed or messageId found'
-                }, 'SSE loop ending');
-                break;
+                  reason: 'SMTP task completed, allowing Claude to finish full response'
+                }, 'SMTP task completed, continuing to capture full Claude response');
               }
             }
           } catch (sseError) {
