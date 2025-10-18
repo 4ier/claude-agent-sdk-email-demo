@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSE 测试页面</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .log {
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+        }
+        .event {
+            margin: 5px 0;
+            padding: 5px;
+            border-left: 3px solid #007bff;
+            background: #f8f9fa;
+        }
+        .event.error {
+            border-left-color: #dc3545;
+            background: #f8d7da;
+        }
+        .event.success {
+            border-left-color: #28a745;
+            background: #d4edda;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        textarea {
+            height: 60px;
+            resize: vertical;
+        }
+    </style>
+</head>
+<body>
+    <h1>SSE 测试页面 - lovtalent-2b-agent</h1>
+    
+    <div class="container">
+        <h2>测试参数</h2>
+        <label>收件人邮箱:</label>
+        <input type="email" id="to" value="yang.fourier@gmail.com">
+        
+        <label>收件人名称:</label>
+        <input type="text" id="recipient" value="百度">
+        
+        <label>邮件意图:</label>
+        <textarea id="intent">在邮件中推广宣传AI招聘应用 lovtalent.com</textarea>
+        
+        <label>语言:</label>
+        <select id="language">
+            <option value="zh-CN">中文</option>
+            <option value="en">English</option>
+        </select>
+        
+        <label>网站 (可选):</label>
+        <input type="text" id="site" value="lovtalent.com">
+        
+        <button onclick="testSSE()" id="testBtn">测试 SSE</button>
+        <button onclick="testJSON()" id="jsonBtn">测试 JSON</button>
+        <button onclick="clearLog()" id="clearBtn">清空日志</button>
+    </div>
+    
+    <div class="container">
+        <h2>实时日志</h2>
+        <div id="log" class="log"></div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        
+        function log(message, type = 'info') {
+            const logDiv = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            const eventDiv = document.createElement('div');
+            eventDiv.className = `event ${type}`;
+            eventDiv.textContent = `[${timestamp}] ${message}`;
+            logDiv.appendChild(eventDiv);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+        
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+        }
+        
+        function getFormData() {
+            return {
+                to: document.getElementById('to').value,
+                recipient: document.getElementById('recipient').value,
+                intent: document.getElementById('intent').value,
+                language: document.getElementById('language').value,
+                site: document.getElementById('site').value || undefined
+            };
+        }
+        
+        function testSSE() {
+            if (eventSource) {
+                eventSource.close();
+            }
+            
+            const data = getFormData();
+            log('开始 SSE 测试...', 'info');
+            log('请求数据: ' + JSON.stringify(data, null, 2), 'info');
+            
+            // 使用 fetch 发送 SSE 请求
+            fetch('http://localhost:3000/api/agent/send', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream'
+                },
+                body: JSON.stringify(data)
+            }).then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                log('SSE 连接已建立', 'success');
+                
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                
+                function readStream() {
+                    reader.read().then(({ done, value }) => {
+                        if (done) {
+                            log('SSE 连接已关闭', 'info');
+                            return;
+                        }
+                        
+                        const chunk = decoder.decode(value, { stream: true });
+                        const lines = chunk.split('\n');
+                        
+                        let currentEvent = null;
+                        let currentData = '';
+                        
+                        for (const line of lines) {
+                            if (line.startsWith('event: ')) {
+                                currentEvent = line.substring(7);
+                            } else if (line.startsWith('data: ')) {
+                                currentData = line.substring(6);
+                            } else if (line === '' && currentEvent && currentData) {
+                                try {
+                                    const data = JSON.parse(currentData);
+                                    log(`事件: ${currentEvent}`, 'success');
+                                    log(`数据: ${JSON.stringify(data, null, 2)}`, 'info');
+                                } catch (e) {
+                                    log(`事件: ${currentEvent}`, 'success');
+                                    log(`数据: ${currentData}`, 'info');
+                                }
+                                currentEvent = null;
+                                currentData = '';
+                            }
+                        }
+                        
+                        readStream();
+                    }).catch(error => {
+                        log('读取流时出错: ' + error.message, 'error');
+                    });
+                }
+                
+                readStream();
+            }).catch(error => {
+                log('SSE 请求失败: ' + error.message, 'error');
+            });
+        }
+        
+        function testJSON() {
+            const data = getFormData();
+            log('开始 JSON 测试...', 'info');
+            log('请求数据: ' + JSON.stringify(data, null, 2), 'info');
+            
+            fetch('http://localhost:3000/api/agent/send', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify(data)
+            }).then(response => response.json())
+            .then(result => {
+                log('JSON 响应: ' + JSON.stringify(result, null, 2), 'success');
+            }).catch(error => {
+                log('JSON 请求失败: ' + error.message, 'error');
+            });
+        }
+        
+        // 页面加载时的初始化
+        log('SSE 测试页面已加载', 'info');
+        log('服务器地址: http://localhost:3000', 'info');
+    </script>
+</body>
+</html>

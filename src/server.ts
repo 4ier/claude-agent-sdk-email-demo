@@ -45,6 +45,41 @@ async function start() {
     res.end(data);
   };
 
+  // SSE utility functions
+  const setupSSE = (res: ServerResponse) => {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Cache-Control, Content-Type, Accept',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'X-Accel-Buffering': 'no' // 禁用nginx缓冲
+    });
+    
+    // 立即发送连接确认和重试指令
+    res.write('retry: 10000\n');
+    res.write('event: connected\n');
+    res.write('data: {"status":"connected"}\n\n');
+    // 强制刷新缓冲区
+    (res as any).flushHeaders?.();
+    res.socket?.write('');
+  };
+
+  const sendSSEEvent = (res: ServerResponse, event: string, data: any, id?: string) => {
+    if (id) res.write(`id: ${id}\n`);
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    // 立即刷新，确保数据立即发送到客户端
+    (res as any).flushHeaders?.();
+    res.socket?.write('');
+  };
+
+  const isSSERequest = (req: IncomingMessage): boolean => {
+    const accept = req.headers.accept || '';
+    return accept.includes('text/event-stream');
+  };
+
   const readJson = (req: IncomingMessage): Promise<any> => {
     return new Promise((resolve, reject) => {
       let raw = '';
@@ -67,6 +102,22 @@ async function start() {
     // Health endpoint
     if (method === 'GET' && url.pathname === '/api/health') {
       return sendJson(res, 200, { ok: true });
+    }
+
+    // SSE Test page
+    if (method === 'GET' && url.pathname === '/test-sse') {
+      const fs = require('fs');
+      const path = require('path');
+      try {
+        const htmlPath = path.join(process.cwd(), 'test-sse.html');
+        const html = fs.readFileSync(htmlPath, 'utf8');
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.end(html);
+        return;
+      } catch (err) {
+        return sendJson(res, 404, { ok: false, error: 'Test page not found' });
+      }
     }
 
     // General SMTP send endpoint
@@ -118,6 +169,12 @@ async function start() {
         }
         const { to, recipient, intent, language, site } = parsed.data;
 
+        // Check if client wants SSE
+        const useSSE = isSSERequest(req);
+        
+        // Generate session ID for this request
+        const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
         // Delegate fully to the Agent: it decides how to search, write, and send.
         const prompt = [
           'You are an autonomous outreach agent.',
@@ -144,98 +201,261 @@ async function start() {
               model: (options as any)?.model,
               args: { to, recipient, intent, language, site },
               prompt,
+              useSSE,
+              sessionId,
             },
           },
           'Claude input'
         );
 
-        setLastSmtpMessageId(undefined);
-        const q = query({ prompt, options });
-        let messageId: string | undefined;
-        let finalJsonId: string | undefined;
-        // Add a simple timeout to ensure API responds
-        const TIMEOUT_MS = Number(process.env.AGENT_ROUTE_TIMEOUT_MS || 45000);
-        let timedOut = false;
-        const timer = setTimeout(() => { timedOut = true; }, TIMEOUT_MS);
-        try {
-          for await (const ev of q) {
-            const e: any = ev as any;
-            // 详细打印 Claude 输出（完整事件）
-            try {
-              log.info({ claude_output: e }, 'Claude output');
-            } catch {}
-            // 增加工具事件摘要日志，便于观察 e.result 等字段
-            try {
-              const name = e?.name || e?.toolName || e?.tool || e?.tool_id;
-              const args = e?.arguments || e?.args || e?.input || e?.params || e?.toolInput;
-              const result = e?.result || e?.toolResult || e?.output;
-              if (e && (String(e.type).includes('tool') || name)) {
-                log.info(
-                  {
-                    claude_tool_summary: {
-                      type: e.type,
-                      name: name || undefined,
-                      hasArgs: !!args,
-                      hasResult: !!result,
-                      resultKeys: result && typeof result === 'object' ? Object.keys(result) : [],
-                    },
-                  },
-                  'Claude tool summary'
-                );
-              }
+        if (useSSE) {
+          // SSE Mode
+          setupSSE(res);
+          
+          // Cleanup function (no heartbeat needed for simple token streaming)
+          const cleanup = () => {
+            // No cleanup needed for simplified implementation
+          };
+
+          // Handle client disconnect
+          req.on('close', cleanup);
+          req.on('error', cleanup);
+
+          setLastSmtpMessageId(undefined);
+          const q = query({ prompt, options });
+          let messageId: string | undefined;
+          let finalJsonId: string | undefined;
+          
+          const TIMEOUT_MS = Number(process.env.AGENT_ROUTE_TIMEOUT_MS || 45000);
+          let timedOut = false;
+          const timer = setTimeout(() => { 
+            timedOut = true;
+            sendSSEEvent(res, 'error', { 
+              error: 'Timeout'
+            });
+            cleanup();
+            res.end();
+          }, TIMEOUT_MS);
+
+          try {
+            for await (const ev of q) {
+              const e: any = ev as any;
+              
+              // 详细打印 Claude 输出（完整事件）- 仅用于服务器端日志
+              try {
+                log.info({ claude_output: e }, 'Claude output');
+              } catch {}
+
+              // 只处理assistant的文本消息，实现token流式输出
               if (e && e.type === 'message') {
-                const blockTypes = Array.isArray(e.content) ? e.content.map((p: any) => p?.type) : [];
-                log.info({ claude_message_summary: { blockTypes } }, 'Claude message summary');
-              }
-            } catch {}
-            // Capture tool result from smtp_send
-            if (e && (e.type === 'tool_result' || e.type === 'mcp_tool_result')) {
-              const name = e.name || e.toolName || e.tool || e.tool_id || '';
-              if (String(name).includes('smtp_send')) {
-                const result = e.result || e.toolResult || e.output || {};
-                const mid = result?.messageId || result?.data?.messageId;
-                if (mid) messageId = String(mid);
-                if (messageId) break;
-              }
-            }
-            // Parse final message for JSON
-            if (e && e.type === 'message') {
-              const parts = Array.isArray(e.content) ? e.content : [];
-              const textBlob = parts.map((p: any) => String(p?.text || p?.content || '')).join('\n').trim();
-              if (textBlob) {
-                try {
-                  const trimmed = textBlob.trim();
-                  const firstBrace = trimmed.indexOf('{');
-                  const lastBrace = trimmed.lastIndexOf('}');
-                  const jsonStr = firstBrace >= 0 && lastBrace > firstBrace ? trimmed.slice(firstBrace, lastBrace + 1) : trimmed;
-                  const obj = JSON.parse(jsonStr);
-                  if (obj && obj.messageId) finalJsonId = String(obj.messageId);
-                  if (finalJsonId) break;
-                } catch {
-                  // ignore non-JSON assistant messages
+                const parts = Array.isArray(e.content) ? e.content : [];
+                
+                // 只处理文本内容，忽略工具调用
+                for (const part of parts) {
+                  if (part && part.type === 'text' && part.text) {
+                    const textContent = String(part.text).trim();
+                    if (textContent) {
+                      // 将文本按空格分割成tokens进行流式输出
+                      const tokens = textContent.split(/(\s+)/);
+                      for (const token of tokens) {
+                        if (token.trim()) {
+                          sendSSEEvent(res, 'token', {
+                            content: token
+                          });
+                        }
+                      }
+                    }
+
+                    // 尝试解析最终的JSON响应以获取messageId
+                    try {
+                      const trimmed = textContent.trim();
+                      const firstBrace = trimmed.indexOf('{');
+                      const lastBrace = trimmed.lastIndexOf('}');
+                      const jsonStr = firstBrace >= 0 && lastBrace > firstBrace ? trimmed.slice(firstBrace, lastBrace + 1) : trimmed;
+                      const obj = JSON.parse(jsonStr);
+                      if (obj && obj.messageId) finalJsonId = String(obj.messageId);
+                    } catch {
+                      // ignore non-JSON assistant messages
+                    }
+                  }
                 }
               }
-            }
-            if (timedOut) {
-              log.warn({ route: '/api/agent/send', timedOut: true }, 'Agent route timeout reached');
-              break;
-            }
-          }
-        } finally {
-          clearTimeout(timer);
-        }
-        // Inside your /api/agent/send handler, before starting the query loop
-        // reset last smtp id to avoid stale reads
-        // setLastSmtpMessageId(undefined);
 
-        const id = messageId || finalJsonId || getLastSmtpMessageId();
-        if (!id) {
-          return sendJson(res, timedOut ? 504 : 500, { ok: false, error: timedOut ? 'Agent timed out without messageId' : 'Agent did not provide messageId' });
+              // 静默处理工具调用和结果，不发送SSE事件，但仍然捕获messageId
+              if (e && (e.type === 'tool_result' || e.type === 'mcp_tool_result')) {
+                const name = e.name || e.toolName || e.tool || e.tool_id || '';
+                const result = e.result || e.toolResult || e.output || {};
+                
+                // 捕获smtp_send的messageId
+                if (String(name).includes('smtp_send')) {
+                  const mid = result?.messageId || result?.data?.messageId;
+                  if (mid) messageId = String(mid);
+                }
+              }
+
+              // 增加工具事件摘要日志，便于观察 e.result 等字段
+              try {
+                const name = e?.name || e?.toolName || e?.tool || e?.tool_id;
+                const args = e?.arguments || e?.args || e?.input || e?.params || e?.toolInput;
+                const result = e?.result || e?.toolResult || e?.output;
+                if (e && (String(e.type).includes('tool') || name)) {
+                  log.info(
+                    {
+                      claude_tool_summary: {
+                        type: e.type,
+                        name: name || undefined,
+                        hasArgs: !!args,
+                        hasResult: !!result,
+                        resultKeys: result && typeof result === 'object' ? Object.keys(result) : [],
+                      },
+                    },
+                    'Claude tool summary'
+                  );
+                }
+                if (e && e.type === 'message') {
+                  const blockTypes = Array.isArray(e.content) ? e.content.map((p: any) => p?.type) : [];
+                  log.info({ claude_message_summary: { blockTypes } }, 'Claude message summary');
+                }
+              } catch {}
+
+              if (timedOut) {
+                break;
+              }
+
+              // Break if we have messageId
+              if (messageId || finalJsonId) break;
+            }
+          } catch (sseError) {
+            // Handle SSE-specific errors
+            const msg = sseError instanceof Error ? sseError.message : String(sseError);
+            if (!res.headersSent) {
+              setupSSE(res);
+            }
+            sendSSEEvent(res, 'error', { 
+              error: msg
+            });
+            res.end();
+            return;
+          } finally {
+            clearTimeout(timer);
+            cleanup();
+          }
+
+          const id = messageId || finalJsonId || getLastSmtpMessageId();
+          
+          // Send final event
+          if (id) {
+            sendSSEEvent(res, 'done', {
+              finished: true
+            });
+          } else {
+            sendSSEEvent(res, 'error', {
+              error: timedOut ? 'Timeout' : 'No response'
+            });
+          }
+          
+          res.end();
+          return;
+        } else {
+          // JSON Mode (backward compatibility)
+          setLastSmtpMessageId(undefined);
+          const q = query({ prompt, options });
+          let messageId: string | undefined;
+          let finalJsonId: string | undefined;
+          
+          const TIMEOUT_MS = Number(process.env.AGENT_ROUTE_TIMEOUT_MS || 45000);
+          let timedOut = false;
+          const timer = setTimeout(() => { timedOut = true; }, TIMEOUT_MS);
+          
+          try {
+            for await (const ev of q) {
+              const e: any = ev as any;
+              // 详细打印 Claude 输出（完整事件）
+              try {
+                log.info({ claude_output: e }, 'Claude output');
+              } catch {}
+              // 增加工具事件摘要日志，便于观察 e.result 等字段
+              try {
+                const name = e?.name || e?.toolName || e?.tool || e?.tool_id;
+                const args = e?.arguments || e?.args || e?.input || e?.params || e?.toolInput;
+                const result = e?.result || e?.toolResult || e?.output;
+                if (e && (String(e.type).includes('tool') || name)) {
+                  log.info(
+                    {
+                      claude_tool_summary: {
+                        type: e.type,
+                        name: name || undefined,
+                        hasArgs: !!args,
+                        hasResult: !!result,
+                        resultKeys: result && typeof result === 'object' ? Object.keys(result) : [],
+                      },
+                    },
+                    'Claude tool summary'
+                  );
+                }
+                if (e && e.type === 'message') {
+                  const blockTypes = Array.isArray(e.content) ? e.content.map((p: any) => p?.type) : [];
+                  log.info({ claude_message_summary: { blockTypes } }, 'Claude message summary');
+                }
+              } catch {}
+              // Capture tool result from smtp_send
+              if (e && (e.type === 'tool_result' || e.type === 'mcp_tool_result')) {
+                const name = e.name || e.toolName || e.tool || e.tool_id || '';
+                if (String(name).includes('smtp_send')) {
+                  const result = e.result || e.toolResult || e.output || {};
+                  const mid = result?.messageId || result?.data?.messageId;
+                  if (mid) messageId = String(mid);
+                  if (messageId) break;
+                }
+              }
+              // Parse final message for JSON
+              if (e && e.type === 'message') {
+                const parts = Array.isArray(e.content) ? e.content : [];
+                const textBlob = parts.map((p: any) => String(p?.text || p?.content || '')).join('\n').trim();
+                if (textBlob) {
+                  try {
+                    const trimmed = textBlob.trim();
+                    const firstBrace = trimmed.indexOf('{');
+                    const lastBrace = trimmed.lastIndexOf('}');
+                    const jsonStr = firstBrace >= 0 && lastBrace > firstBrace ? trimmed.slice(firstBrace, lastBrace + 1) : trimmed;
+                    const obj = JSON.parse(jsonStr);
+                    if (obj && obj.messageId) finalJsonId = String(obj.messageId);
+                    if (finalJsonId) break;
+                  } catch {
+                    // ignore non-JSON assistant messages
+                  }
+                }
+              }
+              if (timedOut) {
+                log.warn({ route: '/api/agent/send', timedOut: true }, 'Agent route timeout reached');
+                break;
+              }
+            }
+          } finally {
+            clearTimeout(timer);
+          }
+
+          const id = messageId || finalJsonId || getLastSmtpMessageId();
+          if (!id) {
+            return sendJson(res, timedOut ? 504 : 500, { ok: false, error: timedOut ? 'Agent timed out without messageId' : 'Agent did not provide messageId' });
+          }
+          return sendJson(res, 200, { ok: true, messageId: id });
         }
-        return sendJson(res, 200, { ok: true, messageId: id });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        return sendJson(res, 500, { ok: false, error: msg });
+        if (isSSERequest(req)) {
+          // SSE error response
+          if (!res.headersSent) {
+            setupSSE(res);
+          }
+          sendSSEEvent(res, 'error', { 
+            error: msg
+          });
+          res.end();
+        } else {
+          // JSON error response
+          return sendJson(res, 500, { ok: false, error: msg });
+        }
       }
     }
 
