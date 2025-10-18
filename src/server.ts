@@ -99,6 +99,23 @@ async function start() {
     const url = new URL(req.url || '/', 'http://localhost');
     const method = req.method || 'GET';
 
+    // Handle CORS preflight requests
+    if (method === 'OPTIONS') {
+      res.writeHead(200, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Accept, Authorization, Cache-Control',
+        'Access-Control-Max-Age': '86400', // 24 hours
+      });
+      res.end();
+      return;
+    }
+
+    // Add CORS headers to all responses
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, Authorization, Cache-Control');
+
     // Health endpoint
     if (method === 'GET' && url.pathname === '/api/health') {
       return sendJson(res, 200, { ok: true });

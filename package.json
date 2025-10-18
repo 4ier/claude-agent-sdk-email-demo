@@ -12,7 +12,11 @@
     "send:joke": "ts-node src/scripts/send-joke.ts",
     "docker:build": "docker compose build",
     "docker:up": "docker compose up -d",
-    "docker:down": "docker compose down"
+    "docker:down": "docker compose down",
+    "frontend:dev": "cd frontend && npm run dev",
+    "frontend:build": "cd frontend && npm run build",
+    "frontend:preview": "cd frontend && npm run preview",
+    "frontend:install": "cd frontend && npm install"
   },
   "keywords": [],
   "author": "",
